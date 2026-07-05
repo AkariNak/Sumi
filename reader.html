@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sumi — Reader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Shippori+Mincho:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body class="reader-body">
+  <div class="reader-top" id="topbar">
+    <a class="ghost" href="index.html" style="border:none;padding-left:0">‹ Library</a>
+    <button class="ghost" id="prevCh" title="Previous chapter">‹ Ch</button>
+    <button class="ghost" id="nextCh" title="Next chapter">Ch ›</button>
+    <div class="r-title" id="rTitle"></div>
+    <div class="spacer"></div>
+    <div class="seg" id="fitSeg">
+      <button data-fit="fit-width" title="Fit width">Width</button>
+      <button data-fit="fit-height" title="Fit height">Height</button>
+      <button data-fit="original" title="Original size">Full</button>
+    </div>
+  </div>
+
+  <div class="stage" id="stage"><div class="loading" style="padding-top:40vh;text-align:center">Loading chapter…</div></div>
+
+  <div class="reader-bottom" id="bottombar">
+    <span class="pageno" id="pageno"></span>
+    <input type="range" id="slider" min="0" value="0" />
+    <select id="chapterSel" title="Jump to chapter"></select>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    const qs = new URLSearchParams(location.search);
+    const slug = qs.get("m");
+    const chNum = qs.get("ch");
+
+    let manga = null, chapters = [], current = null, pages = [];
+    let index = 0;                 // current page (paginated) / last-seen page (vertical)
+    let mode = "paginated";        // 'paginated' | 'vertical'
+    let dir = "rtl";               // 'rtl' | 'ltr'
+    let fit = localStorage.getItem("sumi_fit") || "fit-height";
+    let markedRead = false;
+    let saveTimer = null;
+
+    const stage = document.getElementById("stage");
+
+    (async function init() {
+      const session = await Sumi.requireAuth();
+      if (!session) return;
+      if (!slug || chNum == null) { fail("Missing series or chapter."); return; }
+
+      const { data: m } = await sb.from("manga").select("*").eq("slug", slug).maybeSingle();
+      if (!m) { fail("Series not found."); return; }
+      manga = m;
+      dir = m.reading_direction === "ltr" ? "ltr" : "rtl";
+      mode = m.reading_direction === "vertical" ? "vertical" : "paginated";
+
+      const { data: chs } = await sb
+        .from("chapters").select("id,chapter_number,title")
+        .eq("manga_id", m.id).order("chapter_number");
+      chapters = chs || [];
+      current = chapters.find((c) => String(c.chapter_number) === String(chNum));
+      if (!current) { fail("Chapter not found."); return; }
+
+      const { data: full } = await sb.from("chapters").select("pages").eq("id", current.id).maybeSingle();
+      pages = (full && full.pages) || [];
+      if (!pages.length) { fail("This chapter has no pages yet."); return; }
+
+      // restore saved position
+      const uid = session.user.id;
+      const { data: prog } = await sb.from("read_progress")
+        .select("last_page").eq("user_id", uid).eq("chapter_id", current.id).maybeSingle();
+      index = Math.min(prog?.last_page || 0, pages.length - 1);
+
+      buildChrome();
+      mode === "vertical" ? renderVertical() : renderPaginated();
+      bindKeys();
+    })();
+
+    // ---- chrome ---------------------------------------------------------------
+    function buildChrome() {
+      const n = Number(current.chapter_number);
+      const num = Number.isInteger(n) ? n : n.toFixed(1);
+      document.getElementById("rTitle").innerHTML =
+        `${esc(manga.title)} <small>· Ch. ${num}${current.title ? " — " + esc(current.title) : ""}</small>`;
+
+      const sel = document.getElementById("chapterSel");
+      sel.innerHTML = chapters.map((c) => {
+        const cn = Number.isInteger(Number(c.chapter_number)) ? c.chapter_number : Number(c.chapter_number).toFixed(1);
+        return `<option value="${c.chapter_number}" ${c.id === current.id ? "selected" : ""}>Ch. ${cn}${c.title ? " — " + esc(c.title) : ""}</option>`;
+      }).join("");
+      sel.addEventListener("change", (e) => gotoChapter(e.target.value));
+
+      const idx = chapters.findIndex((c) => c.id === current.id);
+      const prevBtn = document.getElementById("prevCh");
+      const nextBtn = document.getElementById("nextCh");
+      prevBtn.disabled = idx <= 0;
+      nextBtn.disabled = idx >= chapters.length - 1;
+      prevBtn.addEventListener("click", () => idx > 0 && gotoChapter(chapters[idx - 1].chapter_number));
+      nextBtn.addEventListener("click", () => idx < chapters.length - 1 && gotoChapter(chapters[idx + 1].chapter_number));
+
+      // fit control
+      document.querySelectorAll("#fitSeg button").forEach((b) => {
+        b.classList.toggle("on", b.dataset.fit === fit);
+        b.addEventListener("click", () => setFit(b.dataset.fit));
+      });
+
+      // page slider (paginated only)
+      const slider = document.getElementById("slider");
+      slider.max = pages.length - 1;
+      slider.value = index;
+      slider.addEventListener("input", (e) => { if (mode === "paginated") show(Number(e.target.value)); });
+      if (mode === "vertical") document.querySelector(".reader-bottom").style.display = "none";
+    }
+
+    function setFit(f) {
+      fit = f; localStorage.setItem("sumi_fit", f);
+      document.querySelectorAll("#fitSeg button").forEach((b) => b.classList.toggle("on", b.dataset.fit === f));
+      stage.classList.remove("fit-width", "fit-height", "original");
+      stage.classList.add(f);
+    }
+
+    // ---- paginated ------------------------------------------------------------
+    function renderPaginated() {
+      stage.className = `stage paginated ${fit}`;
+      stage.innerHTML = `
+        <div class="nav-zone left"></div>
+        <div class="nav-zone mid"></div>
+        <div class="nav-zone right"></div>
+        <img class="page" id="pageImg" alt="page" />`;
+      stage.querySelector(".nav-zone.left").addEventListener("click", () => dir === "rtl" ? next() : prev());
+      stage.querySelector(".nav-zone.right").addEventListener("click", () => dir === "rtl" ? prev() : next());
+      stage.querySelector(".nav-zone.mid").addEventListener("click", toggleChrome);
+      show(index);
+    }
+
+    function show(i) {
+      index = clamp(i, 0, pages.length - 1);
+      const img = document.getElementById("pageImg");
+      if (img) img.src = pages[index];
+      document.getElementById("slider").value = index;
+      document.getElementById("pageno").textContent = `${index + 1} / ${pages.length}`;
+      preload(index);
+      queueSave();
+      if (index === pages.length - 1) markRead();
+    }
+
+    function next() { index >= pages.length - 1 ? endOfChapter() : show(index + 1); }
+    function prev() { if (index > 0) show(index - 1); }
+
+    function endOfChapter() {
+      markRead();
+      const idx = chapters.findIndex((c) => c.id === current.id);
+      const nextCh = chapters[idx + 1];
+      stage.className = "stage";
+      stage.innerHTML = `
+        <div class="chapter-end">
+          <h3>End of chapter</h3>
+          <p>${esc(manga.title)}</p>
+          <div style="display:flex;gap:12px;justify-content:center;margin-top:22px">
+            ${nextCh ? `<button class="btn" id="goNext">Next chapter ›</button>` : ""}
+            <a class="ghost" href="series.html?m=${encodeURIComponent(slug)}">Back to series</a>
+          </div>
+        </div>`;
+      if (nextCh) document.getElementById("goNext").addEventListener("click", () => gotoChapter(nextCh.chapter_number));
+    }
+
+    // ---- vertical / webtoon ---------------------------------------------------
+    function renderVertical() {
+      stage.className = "stage vertical";
+      stage.innerHTML = pages.map((url, i) => `<img class="page" data-i="${i}" src="${i < 3 ? url : ""}" data-src="${url}" alt="page ${i + 1}">`).join("");
+      // lazy-load as they approach
+      const lazy = new IntersectionObserver((entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            const el = e.target;
+            if (!el.src && el.dataset.src) el.src = el.dataset.src;
+          }
+        });
+      }, { rootMargin: "1200px 0px" });
+      // track current page + save
+      const seen = new IntersectionObserver((entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            index = Number(e.target.dataset.i);
+            queueSave();
+            if (index === pages.length - 1) markRead();
+          }
+        });
+      }, { threshold: 0.5 });
+      stage.querySelectorAll("img.page").forEach((img) => { lazy.observe(img); seen.observe(img); });
+      stage.addEventListener("click", toggleChrome);
+      // resume scroll
+      if (index > 0) {
+        const target = stage.querySelector(`img[data-i="${index}"]`);
+        if (target) target.scrollIntoView();
+      }
+    }
+
+    // ---- shared ---------------------------------------------------------------
+    function preload(i) {
+      [i + 1, i + 2, i - 1].forEach((k) => {
+        if (k >= 0 && k < pages.length) { const im = new Image(); im.src = pages[k]; }
+      });
+    }
+
+    function queueSave() {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveProgress, 700);
+    }
+    async function saveProgress() {
+      const uid = AppState.session?.user?.id; if (!uid) return;
+      await sb.from("read_progress").upsert({
+        user_id: uid, manga_id: manga.id, chapter_id: current.id,
+        last_page: index, updated_at: new Date().toISOString(),
+      });
+    }
+
+    async function markRead() {
+      if (markedRead) return; markedRead = true;
+      const uid = AppState.session?.user?.id; if (!uid) return;
+      await Promise.all([
+        sb.from("chapters_read").upsert({ user_id: uid, chapter_id: current.id, manga_id: manga.id, read_at: new Date().toISOString() }),
+        sb.from("read_analytics").insert({ user_id: uid, manga_id: manga.id, chapter_id: current.id, pages_read: pages.length }),
+        sb.from("read_status").upsert({ user_id: uid, manga_id: manga.id, status: "reading", updated_at: new Date().toISOString() }, { onConflict: "user_id,manga_id", ignoreDuplicates: false }),
+      ]);
+    }
+
+    function gotoChapter(num) {
+      saveProgress();
+      location.href = `reader.html?m=${encodeURIComponent(slug)}&ch=${num}`;
+    }
+
+    function toggleChrome() {
+      document.getElementById("topbar").classList.toggle("hidden");
+      document.getElementById("bottombar").classList.toggle("hidden");
+    }
+
+    function bindKeys() {
+      document.addEventListener("keydown", (e) => {
+        if (mode !== "paginated") return;
+        if (e.key === "ArrowRight" || e.key === "d") dir === "rtl" ? prev() : next();
+        else if (e.key === "ArrowLeft" || e.key === "a") dir === "rtl" ? next() : prev();
+        else if (e.key === " ") { e.preventDefault(); next(); }
+        else if (e.key === "f") toggleChrome();
+      });
+    }
+
+    // ---- utils ----------------------------------------------------------------
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+    function esc(s) { return (s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+    function fail(msg) {
+      stage.className = "stage";
+      stage.innerHTML = `<div class="center-note">${esc(msg)}<br><a class="ghost" style="display:inline-block;margin-top:16px" href="index.html">Back to library</a></div>`;
+    }
+
+    window.addEventListener("beforeunload", () => { if (saveTimer) saveProgress(); });
+  </script>
+</body>
+</html>
