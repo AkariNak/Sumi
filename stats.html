@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sumi — Stats</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Shippori+Mincho:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header id="nav"></header>
+  <main id="main"><div class="loading">Loading…</div></main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    (async function init() {
+      const session = await Sumi.requireAuth();
+      if (!session) return;
+      Sumi.renderNav("stats");
+      if (!AppState.profile?.is_admin) {
+        document.getElementById("main").innerHTML = `<div class="center-note">This page is for admins only.</div>`;
+        return;
+      }
+      await Sumi.loadCatalog();
+      const titleFor = {};
+      AppState.manga.forEach((m) => titleFor[m.id] = m.title);
+
+      const { data: rows, error } = await sb
+        .from("read_analytics")
+        .select("manga_id,pages_read,read_at,user_id")
+        .order("read_at", { ascending: false })
+        .limit(5000);
+      if (error) { document.getElementById("main").innerHTML = `<div class="center-note">${error.message}</div>`; return; }
+
+      render(rows || [], titleFor);
+    })();
+
+    function render(rows, titleFor) {
+      const totalChapters = rows.length;
+      const totalPages = rows.reduce((s, r) => s + (r.pages_read || 0), 0);
+      const readers = new Set(rows.map((r) => r.user_id)).size;
+
+      // most read manga
+      const byManga = {};
+      rows.forEach((r) => { byManga[r.manga_id] = (byManga[r.manga_id] || 0) + 1; });
+      const top = Object.entries(byManga)
+        .map(([id, n]) => ({ title: titleFor[id] || "Unknown", n }))
+        .sort((a, b) => b.n - a.n).slice(0, 10);
+      const topMax = top.length ? top[0].n : 1;
+
+      // heatmap, last 182 days
+      const days = 182;
+      const counts = {};
+      rows.forEach((r) => { const k = r.read_at.slice(0, 10); counts[k] = (counts[k] || 0) + 1; });
+      const cells = [];
+      const today = new Date();
+      let hmax = 1;
+      for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(today); d.setDate(today.getDate() - i);
+        const k = d.toISOString().slice(0, 10);
+        const c = counts[k] || 0; hmax = Math.max(hmax, c);
+        cells.push({ k, c });
+      }
+
+      document.getElementById("main").innerHTML = `
+        <div class="section-title">Reading activity</div>
+        <div class="stat-grid">
+          <div class="stat"><div class="n">${totalChapters.toLocaleString()}</div><div class="l">Chapters read</div></div>
+          <div class="stat"><div class="n">${totalPages.toLocaleString()}</div><div class="l">Pages read</div></div>
+          <div class="stat"><div class="n">${readers}</div><div class="l">Readers</div></div>
+        </div>
+
+        <div class="section-title">Last 6 months</div>
+        <div class="heatmap">
+          ${cells.map((c) => `<div class="cell" title="${c.k}: ${c.c}" style="background:${heat(c.c, hmax)}"></div>`).join("")}
+        </div>
+
+        <div class="section-title">Most read</div>
+        <div class="bars">
+          ${top.length ? top.map((t) => `
+            <div class="bar-row">
+              <span title="${esc(t.title)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.title)}</span>
+              <div class="track"><span style="width:${(t.n / topMax * 100).toFixed(0)}%"></span></div>
+              <span style="text-align:right;color:var(--paper-mute)">${t.n}</span>
+            </div>`).join("") : `<div class="empty">No reads recorded yet.</div>`}
+        </div>`;
+    }
+
+    function heat(c, max) {
+      if (!c) return "var(--ink-3)";
+      const t = c / max;
+      const alpha = 0.25 + t * 0.75;
+      return `rgba(214,69,47,${alpha.toFixed(2)})`;
+    }
+    function esc(s) { return (s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+  </script>
+</body>
+</html>
