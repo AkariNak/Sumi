@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sumi — Series</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Shippori+Mincho:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header id="nav"></header>
+  <main id="main"><div class="loading">Loading…</div></main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    const slug = new URLSearchParams(location.search).get("m");
+    let manga = null, chapters = [], progress = {}, readSet = new Set(), status = null;
+
+    (async function init() {
+      const session = await Sumi.requireAuth();
+      if (!session) return;
+      Sumi.renderNav("");
+      if (!slug) { fail("No series specified."); return; }
+
+      const { data: m } = await sb.from("manga").select("*").eq("slug", slug).maybeSingle();
+      if (!m) { fail("Series not found."); return; }
+      manga = m;
+
+      const uid = session.user.id;
+      const [chRes, prRes, crRes, stRes] = await Promise.all([
+        sb.from("chapters").select("id,chapter_number,volume,title").eq("manga_id", m.id).order("chapter_number"),
+        sb.from("read_progress").select("chapter_id,last_page").eq("user_id", uid).eq("manga_id", m.id),
+        sb.from("chapters_read").select("chapter_id").eq("user_id", uid).eq("manga_id", m.id),
+        sb.from("read_status").select("status").eq("user_id", uid).eq("manga_id", m.id).maybeSingle(),
+      ]);
+      chapters = chRes.data || [];
+      (prRes.data || []).forEach((r) => progress[r.chapter_id] = r.last_page);
+      (crRes.data || []).forEach((r) => readSet.add(r.chapter_id));
+      status = stRes.data?.status || null;
+
+      render();
+    })();
+
+    function render() {
+      const m = manga;
+      const first = chapters[0];
+      const lastRead = chapters.filter((c) => readSet.has(c.id) || progress[c.id] != null).slice(-1)[0];
+      const startTarget = lastRead || first;
+      const startLabel = lastRead ? "Continue reading" : "Start reading";
+
+      const dir = { rtl: "Right to left", ltr: "Left to right", vertical: "Vertical scroll" }[m.reading_direction];
+
+      document.getElementById("main").innerHTML = `
+        <div class="series-hero">
+          <div class="cover" style="${Sumi.coverStyle(m)}"></div>
+          <div>
+            <h1>${esc(m.title)}</h1>
+            <div class="byline">${esc([m.author, m.artist && m.artist !== m.author ? m.artist : null].filter(Boolean).join(" · "))}
+              ${m.year ? " · " + m.year : ""} · ${cap(m.status)} · ${dir}</div>
+            <div class="tags">${(m.genres || []).map((g) => `<span class="tag">${esc(g)}</span>`).join("")}
+              ${m.content_rating === "mature" ? `<span class="tag" style="border-color:var(--seal);color:var(--seal-soft)">Abyss</span>` : ""}</div>
+            <p class="desc">${esc(m.description || "")}</p>
+            <div class="status-row">
+              ${startTarget ? `<button class="btn" id="startBtn">${startLabel}</button>` : `<span class="empty">No chapters yet.</span>`}
+              <select id="statusSel" title="Your reading status">
+                <option value="">Set status…</option>
+                <option value="reading">Reading</option>
+                <option value="plan_to_read">Plan to read</option>
+                <option value="on_hold">On hold</option>
+                <option value="completed">Completed</option>
+                <option value="dropped">Dropped</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="chapter-list">
+          ${chapters.length ? chapters.map(rowHTML).join("") : `<div class="empty">No chapters uploaded yet.</div>`}
+        </div>`;
+
+      const sel = document.getElementById("statusSel");
+      if (status) sel.value = status;
+      sel.addEventListener("change", saveStatus);
+
+      const start = document.getElementById("startBtn");
+      if (start && startTarget) start.addEventListener("click", () => openChapter(startTarget));
+
+      document.querySelectorAll(".chapter-row").forEach((row) => {
+        row.addEventListener("click", () => {
+          const ch = chapters.find((c) => c.id === row.dataset.id);
+          openChapter(ch);
+        });
+      });
+    }
+
+    function rowHTML(c) {
+      const n = Number(c.chapter_number);
+      const num = Number.isInteger(n) ? n : n.toFixed(1);
+      const read = readSet.has(c.id);
+      const inProg = !read && progress[c.id] != null;
+      const state = read ? `<span class="cread">Read</span>`
+                   : inProg ? `<span class="cprog">In progress</span>` : "";
+      return `
+        <div class="chapter-row" data-id="${c.id}">
+          <span class="num">${num}</span>
+          <span class="ctitle">${esc(c.title || "Chapter " + num)}</span>
+          ${state}
+        </div>`;
+    }
+
+    function openChapter(ch) {
+      location.href = `reader.html?m=${encodeURIComponent(slug)}&ch=${ch.chapter_number}`;
+    }
+
+    async function saveStatus(e) {
+      const value = e.target.value;
+      const uid = AppState.session.user.id;
+      if (!value) {
+        await sb.from("read_status").delete().eq("user_id", uid).eq("manga_id", manga.id);
+        return;
+      }
+      await sb.from("read_status").upsert({
+        user_id: uid, manga_id: manga.id, status: value, updated_at: new Date().toISOString(),
+      });
+    }
+
+    function fail(msg) { document.getElementById("main").innerHTML = `<div class="center-note">${esc(msg)}</div>`; }
+    function esc(s) { return (s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+    function cap(s) { return (s || "").charAt(0).toUpperCase() + (s || "").slice(1); }
+  </script>
+</body>
+</html>
