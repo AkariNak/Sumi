@@ -80,6 +80,7 @@ button { font-family: var(--body); cursor: pointer; }
   font-size: 14px; font-weight: 600;
 }
 .btn:hover { background: var(--seal-soft); border-color: var(--seal-soft); }
+.btn-sm { padding: 7px 14px; font-size: 13px; }
 .ghost {
   border: 1px solid var(--line);
   background: transparent; color: var(--paper-dim);
