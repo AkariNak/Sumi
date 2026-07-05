@@ -25,18 +25,28 @@
 
   // ---------------------------------------------------------------------------
   const Sumi = {
-    // Redirect to login if there is no session. Returns the session or null.
-    async requireAuth() {
+    // Load the session if there is one, but never redirect. Returns session|null.
+    // Used by pages that are browsable while logged out.
+    async initSession() {
       const { data } = await sb.auth.getSession();
-      if (!data.session) {
+      AppState.session = data.session || null;
+      if (AppState.session) await this.loadProfile();
+      return AppState.session;
+    },
+
+    // Redirect to login if there is no session. Returns the session or null.
+    // Used only by pages that must be private (e.g. stats).
+    async requireAuth() {
+      const session = await this.initSession();
+      if (!session) {
         const back = encodeURIComponent(location.pathname + location.search);
         location.replace("login.html?next=" + back);
         return null;
       }
-      AppState.session = data.session;
-      await this.loadProfile();
-      return data.session;
+      return session;
     },
+
+    loggedIn() { return !!AppState.session; },
 
     async loadProfile() {
       if (!AppState.session) return null;
@@ -51,7 +61,7 @@
 
     async signOut() {
       await sb.auth.signOut();
-      location.href = "login.html";
+      location.href = "index.html";
     },
 
     setMature(on) {
@@ -80,8 +90,14 @@
     renderNav(active) {
       const el = document.getElementById("nav");
       if (!el) return;
+      const signedIn = this.loggedIn();
       const name = AppState.profile?.username || "reader";
       const isAdmin = !!AppState.profile?.is_admin;
+      const here = encodeURIComponent(location.pathname.split("/").pop() + location.search);
+      const account = signedIn
+        ? `<span class="who">${name}</span>
+           <button class="ghost" id="signOutBtn">Sign out</button>`
+        : `<a class="btn btn-sm" href="login.html?next=${here}">Account</a>`;
       el.innerHTML = `
         <a class="brand" href="index.html" aria-label="Sumi home">
           <svg class="brand-mark" viewBox="0 0 64 64" width="28" height="28" aria-hidden="true">
@@ -99,8 +115,7 @@
             <input type="checkbox" id="matureToggle" ${AppState.showMature ? "checked" : ""}>
             <span>Abyss</span>
           </label>
-          <span class="who">${name}</span>
-          <button class="ghost" id="signOutBtn">Sign out</button>
+          ${account}
         </div>`;
       const t = document.getElementById("matureToggle");
       if (t) t.addEventListener("change", (e) => {
