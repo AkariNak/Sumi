@@ -22,29 +22,31 @@
   <script src="js/config.js"></script>
   <script src="js/app.js"></script>
   <script>
-    let PROGRESS = {};   // manga_id -> {last chapter read, fraction}
+    let PROGRESS = {};   // manga_id -> most recent progress row
+    let STATUS = {};     // manga_id -> status string
 
     (async function init() {
-      const session = await Sumi.requireAuth();
-      if (!session) return;
+      await Sumi.initSession();          // no redirect; may be logged out
       Sumi.renderNav("library");
       await Sumi.loadCatalog();
-      await loadProgress();
+      if (Sumi.loggedIn()) await loadPersonal();
       render();
 
       document.addEventListener("sumi:mature-changed", render);
       document.getElementById("search").addEventListener("input", (e) => renderSearch(e.target.value.trim()));
     })();
 
-    async function loadProgress() {
+    async function loadPersonal() {
       const uid = AppState.session.user.id;
-      const { data } = await sb
-        .from("read_progress")
-        .select("manga_id,chapter_id,last_page,updated_at")
-        .eq("user_id", uid)
-        .order("updated_at", { ascending: false });
+      const [prog, stat] = await Promise.all([
+        sb.from("read_progress").select("manga_id,chapter_id,last_page,updated_at")
+          .eq("user_id", uid).order("updated_at", { ascending: false }),
+        sb.from("read_status").select("manga_id,status").eq("user_id", uid),
+      ]);
       PROGRESS = {};
-      (data || []).forEach((r) => { if (!PROGRESS[r.manga_id]) PROGRESS[r.manga_id] = r; });
+      (prog.data || []).forEach((r) => { if (!PROGRESS[r.manga_id]) PROGRESS[r.manga_id] = r; });
+      STATUS = {};
+      (stat.data || []).forEach((r) => { STATUS[r.manga_id] = r.status; });
     }
 
     function cardHTML(m) {
@@ -75,9 +77,13 @@
       }
       let html = "";
 
-      // Continue reading
-      const cont = all.filter((m) => PROGRESS[m.id]);
-      html += shelf("Continue Reading", cont, cont.length + " in progress");
+      // Personal shelves (only when signed in and non-empty)
+      if (Sumi.loggedIn()) {
+        const cont = all.filter((m) => PROGRESS[m.id] && STATUS[m.id] !== "completed");
+        html += shelf("Continue Reading", cont, cont.length + " in progress");
+        html += shelf("Plan to Read", all.filter((m) => STATUS[m.id] === "plan_to_read"));
+        html += shelf("Completed", all.filter((m) => STATUS[m.id] === "completed"));
+      }
 
       // Recently added
       const recent = [...all].sort((a, b) => (b.year || 0) - (a.year || 0)).slice(0, 18);
