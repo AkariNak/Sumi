@@ -50,8 +50,7 @@
     const stage = document.getElementById("stage");
 
     (async function init() {
-      const session = await Sumi.requireAuth();
-      if (!session) return;
+      await Sumi.initSession();          // no redirect; reading works logged out
       if (!slug || chNum == null) { fail("Missing series or chapter."); return; }
 
       const { data: m } = await sb.from("manga").select("*").eq("slug", slug).maybeSingle();
@@ -71,11 +70,13 @@
       pages = (full && full.pages) || [];
       if (!pages.length) { fail("This chapter has no pages yet."); return; }
 
-      // restore saved position
-      const uid = session.user.id;
-      const { data: prog } = await sb.from("read_progress")
-        .select("last_page").eq("user_id", uid).eq("chapter_id", current.id).maybeSingle();
-      index = Math.min(prog?.last_page || 0, pages.length - 1);
+      // restore saved position (signed-in readers only)
+      if (Sumi.loggedIn()) {
+        const uid = AppState.session.user.id;
+        const { data: prog } = await sb.from("read_progress")
+          .select("last_page").eq("user_id", uid).eq("chapter_id", current.id).maybeSingle();
+        index = Math.min(prog?.last_page || 0, pages.length - 1);
+      }
 
       buildChrome();
       mode === "vertical" ? renderVertical() : renderPaginated();
