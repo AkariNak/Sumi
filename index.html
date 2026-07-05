@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sumi</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Shippori+Mincho:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header id="nav"></header>
+  <main>
+    <div class="searchbar">
+      <input id="search" type="search" placeholder="Search titles, authors, genres…" />
+    </div>
+    <div id="content"><div class="loading">Loading library…</div></div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    let PROGRESS = {};   // manga_id -> {last chapter read, fraction}
+
+    (async function init() {
+      const session = await Sumi.requireAuth();
+      if (!session) return;
+      Sumi.renderNav("library");
+      await Sumi.loadCatalog();
+      await loadProgress();
+      render();
+
+      document.addEventListener("sumi:mature-changed", render);
+      document.getElementById("search").addEventListener("input", (e) => renderSearch(e.target.value.trim()));
+    })();
+
+    async function loadProgress() {
+      const uid = AppState.session.user.id;
+      const { data } = await sb
+        .from("read_progress")
+        .select("manga_id,chapter_id,last_page,updated_at")
+        .eq("user_id", uid)
+        .order("updated_at", { ascending: false });
+      PROGRESS = {};
+      (data || []).forEach((r) => { if (!PROGRESS[r.manga_id]) PROGRESS[r.manga_id] = r; });
+    }
+
+    function cardHTML(m) {
+      const p = PROGRESS[m.id];
+      const badge = m.content_rating === "mature" ? `<span class="badge">Abyss</span>` : "";
+      const resume = p ? `<div class="resume"><span style="width:35%"></span></div>` : "";
+      return `
+        <a class="card" href="series.html?m=${encodeURIComponent(m.slug)}">
+          <div class="cover" style="${Sumi.coverStyle(m)}">${badge}${resume}</div>
+          <div class="title">${escapeHtml(m.title)}</div>
+          <div class="meta">${escapeHtml(m.author || "")}</div>
+        </a>`;
+    }
+
+    function shelf(title, list, extra = "") {
+      if (!list.length) return "";
+      return `
+        <div class="section-title">${title} <span class="count">${extra || list.length + " titles"}</span></div>
+        <div class="shelf">${list.map(cardHTML).join("")}</div>`;
+    }
+
+    function render() {
+      const all = Sumi.visibleManga();
+      const c = document.getElementById("content");
+      if (!all.length) {
+        c.innerHTML = `<div class="empty">No titles yet. Add some through the Supabase SQL editor (see schema.sql).</div>`;
+        return;
+      }
+      let html = "";
+
+      // Continue reading
+      const cont = all.filter((m) => PROGRESS[m.id]);
+      html += shelf("Continue Reading", cont, cont.length + " in progress");
+
+      // Recently added
+      const recent = [...all].sort((a, b) => (b.year || 0) - (a.year || 0)).slice(0, 18);
+      html += shelf("Recently Added", recent, "newest");
+
+      // Genre shelves
+      const byGenre = {};
+      all.forEach((m) => (m.genres || []).forEach((g) => { (byGenre[g] ||= []).push(m); }));
+      Object.keys(byGenre).sort().forEach((g) => {
+        if (byGenre[g].length >= 2) html += shelf(g, byGenre[g]);
+      });
+
+      c.innerHTML = html;
+    }
+
+    function renderSearch(q) {
+      if (!q) { render(); return; }
+      const needle = q.toLowerCase();
+      const hits = Sumi.visibleManga().filter((m) => {
+        const hay = [m.title, m.author, m.artist, ...(m.alt_titles || []), ...(m.genres || [])]
+          .filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(needle);
+      });
+      const c = document.getElementById("content");
+      c.innerHTML = `
+        <div class="section-title">Results <span class="count">${hits.length}</span></div>
+        ${hits.length ? `<div class="grid">${hits.map(cardHTML).join("")}</div>`
+                      : `<div class="empty">Nothing matched “${escapeHtml(q)}”.</div>`}`;
+    }
+
+    function escapeHtml(s) {
+      return (s || "").replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+  </script>
+</body>
+</html>
