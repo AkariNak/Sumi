@@ -21,8 +21,7 @@
     let manga = null, chapters = [], progress = {}, readSet = new Set(), status = null;
 
     (async function init() {
-      const session = await Sumi.requireAuth();
-      if (!session) return;
+      await Sumi.initSession();          // no redirect; may be logged out
       Sumi.renderNav("");
       if (!slug) { fail("No series specified."); return; }
 
@@ -30,17 +29,22 @@
       if (!m) { fail("Series not found."); return; }
       manga = m;
 
-      const uid = session.user.id;
-      const [chRes, prRes, crRes, stRes] = await Promise.all([
-        sb.from("chapters").select("id,chapter_number,volume,title").eq("manga_id", m.id).order("chapter_number"),
-        sb.from("read_progress").select("chapter_id,last_page").eq("user_id", uid).eq("manga_id", m.id),
-        sb.from("chapters_read").select("chapter_id").eq("user_id", uid).eq("manga_id", m.id),
-        sb.from("read_status").select("status").eq("user_id", uid).eq("manga_id", m.id).maybeSingle(),
-      ]);
-      chapters = chRes.data || [];
-      (prRes.data || []).forEach((r) => progress[r.chapter_id] = r.last_page);
-      (crRes.data || []).forEach((r) => readSet.add(r.chapter_id));
-      status = stRes.data?.status || null;
+      const { data: chData } = await sb
+        .from("chapters").select("id,chapter_number,volume,title")
+        .eq("manga_id", m.id).order("chapter_number");
+      chapters = chData || [];
+
+      if (Sumi.loggedIn()) {
+        const uid = AppState.session.user.id;
+        const [prRes, crRes, stRes] = await Promise.all([
+          sb.from("read_progress").select("chapter_id,last_page").eq("user_id", uid).eq("manga_id", m.id),
+          sb.from("chapters_read").select("chapter_id").eq("user_id", uid).eq("manga_id", m.id),
+          sb.from("read_status").select("status").eq("user_id", uid).eq("manga_id", m.id).maybeSingle(),
+        ]);
+        (prRes.data || []).forEach((r) => progress[r.chapter_id] = r.last_page);
+        (crRes.data || []).forEach((r) => readSet.add(r.chapter_id));
+        status = stRes.data?.status || null;
+      }
 
       render();
     })();
@@ -66,6 +70,7 @@
             <p class="desc">${esc(m.description || "")}</p>
             <div class="status-row">
               ${startTarget ? `<button class="btn" id="startBtn">${startLabel}</button>` : `<span class="empty">No chapters yet.</span>`}
+              ${Sumi.loggedIn() ? `
               <select id="statusSel" title="Your reading status">
                 <option value="">Set status…</option>
                 <option value="reading">Reading</option>
@@ -73,7 +78,8 @@
                 <option value="on_hold">On hold</option>
                 <option value="completed">Completed</option>
                 <option value="dropped">Dropped</option>
-              </select>
+              </select>` : `
+              <a class="ghost" href="login.html?next=${encodeURIComponent('series.html?m=' + slug)}">Sign in to track</a>`}
             </div>
           </div>
         </div>
@@ -83,8 +89,10 @@
         </div>`;
 
       const sel = document.getElementById("statusSel");
-      if (status) sel.value = status;
-      sel.addEventListener("change", saveStatus);
+      if (sel) {
+        if (status) sel.value = status;
+        sel.addEventListener("change", saveStatus);
+      }
 
       const start = document.getElementById("startBtn");
       if (start && startTarget) start.addEventListener("click", () => openChapter(startTarget));
